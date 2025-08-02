@@ -98,7 +98,7 @@ replyServer log local links haddock store cdn home htmlDir scope Input{..} = cas
         let q = concatMap parseQuery qSource
         let (q2, results) = search store q
         let body = showResults local links haddock (filter ((/= "mode") . fst) inputArgs) q2 $
-                dedupeTake 25 (\t -> t{targetURL="",targetPackage=Nothing, targetModule=Nothing}) results
+                dedupeTake 50 (\t -> t{targetURL="",targetPackage=Nothing, targetModule=Nothing}) results
         case lookup "mode" inputArgs of
             Nothing | qSource /= [] -> fmap OutputHTML $ templateRender templateIndex
                         [("tags", html $ tagOptions qScope)
