@@ -1,7 +1,7 @@
 {-# LANGUAGE PatternGuards, DeriveDataTypeable, ScopedTypeVariables #-}
 
 module General.Template(
-    Template, templateFile, templateMarkup, templateApply, templateRender
+    Template, templateFile, templateBytes, templateMarkup, templateApply, templateRender
     ) where
 
 import Data.Data
@@ -34,13 +34,16 @@ data Tree = Lam FilePath -- #{foo} defines a lambda
 treeRemoveLam :: Tree -> IO Tree
 treeRemoveLam = transformM f
     where
-        f (Lam file) = List . parse <$> bstrReadFile file
+        f (Lam file) = List . parseTemplateBytes <$> bstrReadFile file
         f x = pure x
 
-        parse x | Just (a,b) <- bstrSplitInfix (bstrPack "#{") x
-                , Just (b,c) <- bstrSplitInfix (bstrPack "}") b
-                = Lit a : Var b : parse c
-        parse x = [Lit x]
+-- | Parse a raw template string into the @Lit@/@Var@ leaves of a 'Tree'.
+-- Splits on @#{varname}@ markers.
+parseTemplateBytes :: BStr -> [Tree]
+parseTemplateBytes x | Just (a,b) <- bstrSplitInfix (bstrPack "#{") x
+                     , Just (b',c) <- bstrSplitInfix (bstrPack "}") b
+                     = Lit a : Var b' : parseTemplateBytes c
+parseTemplateBytes x = [Lit x]
 
 treeRemoveApp :: Tree -> Tree
 treeRemoveApp = f []
@@ -98,6 +101,11 @@ templateTree t = Template t $ treeCache t
 
 templateFile :: FilePath -> Template
 templateFile = templateTree . Lam
+
+-- | Build a 'Template' from raw bytes (e.g. an embedded asset). Parsed once
+-- eagerly; no mtime-based hot-reload (the bytes are immutable).
+templateBytes :: BStr -> Template
+templateBytes = templateTree . List . parseTemplateBytes
 
 templateMarkup :: Markup -> Template
 templateMarkup = templateStr . renderMarkup

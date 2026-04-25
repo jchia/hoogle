@@ -67,6 +67,13 @@ data Output
     | OutputJSON Encoding
     | OutputFail LBS.ByteString
     | OutputFile FilePath
+    | OutputBytes BS.ByteString FilePath
+      -- ^ Body bytes plus the original asset name (used only for
+      -- content-type lookup via the 'contentType' table; never opened).
+    | OutputNotFound
+      -- ^ 404. Used when an embedded asset lookup misses; deliberately
+      -- does not fall through to the filesystem (which would resolve
+      -- relative paths against the process cwd).
       deriving Show
 
 -- | Force all the output (no delayed exceptions) and produce bytestrings
@@ -77,6 +84,8 @@ forceBS (OutputHTML x) = force x
 forceBS (OutputJavascript x) = force x
 forceBS (OutputFail x) = force x
 forceBS (OutputFile x) = rnf x `seq` LBS.empty
+forceBS (OutputBytes x p) = rnf p `seq` rnf x `seq` LBS.fromStrict x
+forceBS OutputNotFound = LBS.empty
 
 instance NFData Output where
     rnf x = forceBS x `seq` ()
@@ -179,6 +188,9 @@ server log Server{..} act = do
             Right (v, bs) -> reply $ case v of
                 OutputFile file -> responseFile status200
                     ([("content-type",c) | Just c <- [lookup (takeExtension file) contentType]] ++ secH) file Nothing
+                OutputBytes _ name -> responseLBS status200
+                    ([("content-type",c) | Just c <- [lookup (takeExtension name) contentType]] ++ secH) bs
+                OutputNotFound -> responseLBS status404 secH bs
                 OutputText{} -> responseLBS status200 (("content-type","text/plain") : secH) bs
                 OutputJSON{} -> responseLBS status200 (("content-type","application/json") : ("access-control-allow-origin","*") : secH) bs
                 OutputFail{} -> responseLBS status400 (("content-type","text/plain") : secH) bs

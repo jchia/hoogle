@@ -22,11 +22,6 @@ extra-doc-files:
 extra-source-files:
     cbits/*.h
     cbits/*.c
-data-files:
-    misc/sample-data/henry.txt
-    misc/sample-data/emily-1.11/emily.txt
-    misc/sample-data/emily-1.2/emily.txt
-    misc/settings.txt
     html/*.js
     html/*.png
     html/*.css
@@ -35,6 +30,11 @@ data-files:
     html/plugin/*.css
     html/plugin/*.js
     html/plugin/*.png
+data-files:
+    misc/sample-data/henry.txt
+    misc/sample-data/emily-1.11/emily.txt
+    misc/sample-data/emily-1.2/emily.txt
+    misc/settings.txt
 
 source-repository head
     type:     git
@@ -63,6 +63,7 @@ library
         deepseq,
         directory,
         extra >= 1.6.6,
+        file-embed >= 0.0.15 && < 0.1,
         filepath,
         ghc-lib-parser >= 9.6.5 && < 9.16,
         hackage-revdeps >= 0.3 && < 0.4,
@@ -127,6 +128,7 @@ library
         Output.Types
         Query
         General.Conduit
+        General.Embedded
         General.IString
         General.Log
         General.Store

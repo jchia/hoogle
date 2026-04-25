@@ -32,6 +32,7 @@ import Data.Time.Calendar
 import System.IO.Unsafe
 import Numeric.Extra
 import System.Info.Extra
+import System.Environment (lookupEnv)
 
 import Output.Tags
 import Query
@@ -40,6 +41,7 @@ import General.Util
 import General.Web
 import General.Store
 import General.Template
+import General.Embedded (embeddedHtml, embeddedJsJquery, embeddedJsFlot, embeddedJsFlotTime)
 import General.Log
 import Action.Search
 import Action.CmdLine
@@ -48,6 +50,21 @@ import Data.Monoid
 import Prelude
 
 import qualified Data.Aeson as JSON
+
+-- | Where the server reads bundled UI assets from.
+data AssetSource
+    = SourceDir FilePath  -- ^ Override: read from this directory (--datadir CLI or $hoogle_datadir env).
+    | SourceEmbedded      -- ^ Default: serve from the binary's compile-time bundle.
+
+-- | Resolve which source to use. Priority: --datadir CLI flag, then
+-- $hoogle_datadir env var (preserves the override behavior Cabal's autogen
+-- Paths_hoogle.getDataDir provided for free), else embedded.
+mkAssetSource :: Maybe FilePath -> IO AssetSource
+mkAssetSource cliFlag = do
+    fromEnv <- lookupEnv "hoogle_datadir"
+    pure $ case cliFlag <|> fromEnv of
+        Just d  -> SourceDir d
+        Nothing -> SourceEmbedded
 
 actionServer :: CmdLine -> IO ()
 actionServer cmd@Server{..} = do
@@ -61,10 +78,10 @@ actionServer cmd@Server{..} = do
         \x -> BS.pack "hoogle=" `BS.isInfixOf` x && not (BS.pack "is:ping" `BS.isInfixOf` x)
     putStrLn . showDuration =<< time
     evaluate spawned
-    dataDir <- maybe getDataDir pure datadir
+    source <- mkAssetSource datadir
     haddock <- maybe (pure Nothing) (fmap Just . canonicalizePath) haddock
     withSearch database $ \store ->
-        server log cmd $ replyServer log local links haddock store cdn home (dataDir </> "html") scope
+        server log cmd $ replyServer log local links haddock store cdn home source scope
 
 actionReplay :: CmdLine -> IO ()
 actionReplay Replay{..} = withBuffering stdout NoBuffering $ do
@@ -72,8 +89,7 @@ actionReplay Replay{..} = withBuffering stdout NoBuffering $ do
     let qs = catMaybes [readInput url | _:ip:_:url:_ <- map words $ lines src, ip /= "-"]
     (t,_) <- duration $ withSearch database $ \store -> do
         log <- logNone
-        dataDir <- getDataDir
-        let op = replyServer log False False Nothing store "" "" (dataDir </> "html") scope
+        let op = replyServer log False False Nothing store "" "" SourceEmbedded scope
         replicateM_ repeat_ $ forM_ qs $ \x -> do
             res <- op x
             evaluate $ rnf res
@@ -84,8 +100,8 @@ actionReplay Replay{..} = withBuffering stdout NoBuffering $ do
 spawned :: UTCTime
 spawned = unsafePerformIO getCurrentTime
 
-replyServer :: Log -> Bool -> Bool -> Maybe FilePath -> StoreRead -> String -> String -> FilePath -> String -> Input -> IO Output
-replyServer log local links haddock store cdn home htmlDir scope Input{..} = case inputURL of
+replyServer :: Log -> Bool -> Bool -> Maybe FilePath -> StoreRead -> String -> String -> AssetSource -> String -> Input -> IO Output
+replyServer log local links haddock store cdn home source scope Input{..} = case inputURL of
     -- without -fno-state-hack things can get folded under this lambda
     [] -> do
         let grabBy name = [x | (a,x) <- inputArgs, name a, x /= ""]
@@ -121,9 +137,15 @@ replyServer log local links haddock store cdn home htmlDir scope Input{..} = cas
                 Just f -> pure $ OutputFail $ lbstrPack $ "Format mode " ++ f ++ " not (currently) supported"
                 Nothing -> pure $ OutputJSON $ JSON.toEncoding filteredResults
             Just m -> pure $ OutputFail $ lbstrPack $ "Mode " ++ m ++ " not (currently) supported"
-    ["plugin","jquery.js"] -> OutputFile <$> JQuery.file
-    ["plugin","jquery.flot.js"] -> OutputFile <$> Flot.file Flot.Flot
-    ["plugin","jquery.flot.time.js"] -> OutputFile <$> Flot.file Flot.FlotTime
+    ["plugin","jquery.js"] -> case source of
+        SourceDir _    -> OutputFile <$> JQuery.file
+        SourceEmbedded -> pure $ OutputBytes embeddedJsJquery "jquery.js"
+    ["plugin","jquery.flot.js"] -> case source of
+        SourceDir _    -> OutputFile <$> Flot.file Flot.Flot
+        SourceEmbedded -> pure $ OutputBytes embeddedJsFlot "jquery.flot.js"
+    ["plugin","jquery.flot.time.js"] -> case source of
+        SourceDir _    -> OutputFile <$> Flot.file Flot.FlotTime
+        SourceEmbedded -> pure $ OutputBytes embeddedJsFlotTime "jquery.flot.time.js"
 
     ["canary"] -> do
         now <- getCurrentTime
@@ -158,7 +180,17 @@ replyServer log local links haddock store cdn home htmlDir scope Input{..} = cas
             -- so replace on file:// and drop all leading empty paths above
             pure $ OutputHTML $ lbstrPack $ replace "file://" "/file/" src
     xs ->
-        pure $ OutputFile $ joinPath $ htmlDir : xs
+        pure $ case source of
+            SourceDir d    -> OutputFile $ joinPath $ d : "html" : xs
+            SourceEmbedded ->
+                let relPath = joinPath xs
+                in case lookup relPath embeddedHtml of
+                    Just b  -> OutputBytes b relPath
+                    Nothing -> OutputNotFound
+                        -- ^ Embedded miss is a 404; we deliberately do NOT
+                        -- fall through to the filesystem. A relative path
+                        -- handed to responseFile would resolve against the
+                        -- process cwd and could expose unrelated files.
     where
         html = templateMarkup
         text = templateMarkup . H.string
@@ -169,11 +201,16 @@ replyServer log local links haddock store cdn home htmlDir scope Input{..} = cas
             ,("home", text home)
             ,("jquery", text $ if null cdn then "plugin/jquery.js" else "https:" ++ JQuery.url)
             ,("version", text $ showVersion version ++ " " ++ showUTCTime "%Y-%m-%d %H:%M" spawned)]
-        templateIndex = templateFile (htmlDir </> "index.html") `templateApply` params
-        templateEmpty = templateFile (htmlDir </>  "welcome.html")
+        loadTemplate name = case source of
+            SourceDir d    -> templateFile (d </> "html" </> name)
+            SourceEmbedded -> case lookup name embeddedHtml of
+                Just b  -> templateBytes b
+                Nothing -> error $ "embedded asset missing: " ++ name
+        templateIndex = loadTemplate "index.html" `templateApply` params
+        templateEmpty = loadTemplate "welcome.html"
         templateHome = templateIndex `templateApply` [("tags",html $ tagOptions []),("body",templateEmpty),("title",text "Hoogle"),("search",text ""),("robots",text "index")]
-        templateLog = templateFile (htmlDir </> "log.html") `templateApply` params
-        templateLogJs = templateFile (htmlDir </> "log.js") `templateApply` params
+        templateLog = loadTemplate "log.html" `templateApply` params
+        templateLogJs = loadTemplate "log.js" `templateApply` params
 
 
 dedupeTake :: Ord k => Int -> (v -> k) -> [v] -> [[v]]
@@ -280,9 +317,8 @@ action_server_test :: Bool -> FilePath -> IO ()
 action_server_test sample database = do
     testing "Action.Server.replyServer" $ withSearch database $ \store -> do
         log <- logNone
-        dataDir <- getDataDir
         let check p q = do
-                OutputHTML (lbstrUnpack -> res) <- replyServer log False False Nothing store "" "" (dataDir </> "html") "" (Input [] [("hoogle",q)])
+                OutputHTML (lbstrUnpack -> res) <- replyServer log False False Nothing store "" "" SourceEmbedded "" (Input [] [("hoogle",q)])
                 if p res then putChar '.' else fail $ "Bad substring: " ++ res
         let q === want = check (want `isInfixOf`) q
         let q /== want = check (not . isInfixOf want) q
